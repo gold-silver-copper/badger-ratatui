@@ -99,8 +99,6 @@ const SHAKE: f32 = 1.7;
 const STIFFNESS: f32 = 40.0;
 const DAMPING: f32 = 3.0;
 const PULL: f32 = 10.0;
-/// How far the art may swing from the middle, in screen heights.
-const REACH: (f32, f32) = (0.35, 0.28);
 /// Turning the badge at this many degrees a second doubles the backdrop's pace.
 const SPIN: f32 = 90.0;
 
@@ -278,12 +276,27 @@ impl Scene {
 /// The art hangs on a spring in the badge: tilt the badge and it slides
 /// downhill, jostle it and it wobbles, and it leans into its swing. Offsets
 /// are in screen heights from the middle.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct Body {
     x: f32,
     y: f32,
     vx: f32,
     vy: f32,
+    /// How far the art can go from the middle before it meets the screen's
+    /// edges, in screen heights: set from the art's size as it is drawn.
+    room: (f32, f32),
+}
+
+impl Default for Body {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            room: (f32::MAX, f32::MAX),
+        }
+    }
 }
 
 impl Body {
@@ -294,12 +307,13 @@ impl Body {
         self.x += self.vx * dt;
         self.y += self.vy * dt;
         // The screen's edges: the art bounces off them, losing most of its speed.
-        if self.x.abs() > REACH.0 {
-            self.x = self.x.clamp(-REACH.0, REACH.0);
+        let (rx, ry) = self.room;
+        if self.x.abs() > rx {
+            self.x = self.x.clamp(-rx, rx);
             self.vx *= -0.4;
         }
-        if self.y.abs() > REACH.1 {
-            self.y = self.y.clamp(-REACH.1, REACH.1);
+        if self.y.abs() > ry {
+            self.y = self.y.clamp(-ry, ry);
             self.vy *= -0.4;
         }
     }
@@ -319,6 +333,9 @@ struct Placed<'a> {
     sy: f32,
     /// The lean's cosine and sine.
     lean: (f32, f32),
+    /// How far the art's centre can go from the middle and stay on screen,
+    /// before its own motion, in screen heights.
+    room: (f32, f32),
     /// The wave motion's vertical offset for each sample column, from one
     /// left of the screen to one right of it; all 0 when the art doesn't wave.
     lift: [f32; MAX_W + 2],
@@ -354,6 +371,29 @@ impl Placed<'_> {
             }
             Motion::Wave => wave = 1.2,
         }
+        // Half the art's bounding box as leaned, in samples, wave and all.
+        let lean = body.lean();
+        let (c, s) = (cosf(lean), sinf(lean));
+        let (half_w, half_h) = (w * sx * 0.5, h * sy * 0.5 * SAMPLE_ASPECT);
+        let mut reach_x = c.abs() * half_w + s.abs() * half_h;
+        let mut reach_y = (s.abs() * half_w + c.abs() * half_h) / SAMPLE_ASPECT;
+        let (mid_x, mid_y) = (g.w as f32 * 0.5, g.h as f32 * 0.5);
+        // Leaning, tall art can outgrow the screen: it shrinks to fit.
+        let shrink = (mid_x / reach_x.max(1e-3))
+            .min((mid_y - wave) / reach_y.max(1e-3))
+            .min(1.0);
+        if shrink < 1.0 {
+            (sx, sy, reach_x, reach_y) =
+                (sx * shrink, sy * shrink, reach_x * shrink, reach_y * shrink);
+        }
+        let reach_y = reach_y + wave;
+        let room = (
+            (mid_x - reach_x).max(0.0) / (g.h as f32 * SAMPLE_ASPECT),
+            (mid_y - reach_y).max(0.0) / g.h as f32,
+        );
+        // Held on screen whatever the motion adds; art too big stays centred.
+        let cx = cx.clamp(reach_x.min(mid_x), (g.w as f32 - reach_x).max(mid_x));
+        let cy = cy.clamp(reach_y.min(mid_y), (g.h as f32 - reach_y).max(mid_y));
         let mut lift = [0.0; MAX_W + 2];
         if wave != 0.0 {
             for (slot, x) in lift.iter_mut().zip(-1..=g.w as i32) {
@@ -367,7 +407,8 @@ impl Placed<'_> {
             cy,
             sx,
             sy,
-            lean: (cosf(body.lean()), sinf(body.lean())),
+            lean: (c, s),
+            room,
             lift,
         }
     }
@@ -579,6 +620,8 @@ impl Showcase {
             .old
             .as_ref()
             .map(|(scene, art)| Layer::new(scene, art, body, g, t, flow));
+        // The spring's walls are where this art meets the screen's edges.
+        self.body.room = new.art.room;
         let frame = &FrameJob {
             g,
             new,
@@ -883,6 +926,42 @@ mod tests {
         assert!((body.x - PULL * 0.5 / STIFFNESS).abs() < 1e-3);
         assert!((body.y + PULL * 0.2 / STIFFNESS).abs() < 1e-3);
         assert!(body.lean().abs() < 1e-3);
+    }
+
+    #[test]
+    fn every_subject_stays_on_screen_however_hard_the_badge_tilts() {
+        let area = Rect::new(0, 0, 53, 18);
+        let mut buf = Buffer::empty(area);
+        for subject in SUBJECTS.iter().copied() {
+            for motion in MOTIONS.iter().copied() {
+                let mut show = showcase(5);
+                let mut scene = show.scene.clone();
+                (scene.subject, scene.motion) = (subject, motion);
+                show.cut(scene);
+                show.old = None;
+                for (k, tilt) in [[2.0, 1.5, 0.0], [-2.0, -1.5, 0.0], [2.0, -2.0, 0.0]]
+                    .into_iter()
+                    .cycle()
+                    .take(120)
+                    .enumerate()
+                {
+                    let input = Reading {
+                        accel: if k % 40 < 30 { tilt } else { [0.0; 3] },
+                        ..Reading::default()
+                    };
+                    show.update(&input, 1.0 / 60.0);
+                    show.render(area, &mut buf, &mut OneCore);
+                    let (w, h, _) = show.grid.expect("drawn");
+                    let g = Geometry::new(&show.buffers.polar, w, h, 1.0);
+                    let placed = Placed::new(&show.art, show.scene.motion, &show.body, &g, show.t);
+                    let inked = |x: i32, y: i32| placed.ink(x, y);
+                    // Nothing of the art lies just past any edge.
+                    let off = (-2..w as i32 + 2).any(|x| inked(x, -1) || inked(x, h as i32))
+                        || (-2..h as i32 + 2).any(|y| inked(-1, y) || inked(w as i32, y));
+                    assert!(!off, "{} clipped at step {k}", subject.name());
+                }
+            }
+        }
     }
 
     #[test]
