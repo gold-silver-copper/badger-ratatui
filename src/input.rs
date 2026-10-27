@@ -1,4 +1,4 @@
-//! Hardware-independent input shared by the screens and the sensor driver.
+//! Hardware-independent input shared by the showcase and the sensor driver.
 
 pub const DOWN: u8 = 1 << 0;
 pub const LEFT: u8 = 1 << 1;
@@ -8,12 +8,11 @@ pub const UP: u8 = 1 << 4;
 
 #[derive(Clone, Copy, Default)]
 pub struct Reading {
-    /// One bit per touch pad, CAP1..CAP8.
-    pub touch: u8,
     /// Physical switches, pressed = 1: `DOWN`, `LEFT`, `RIGHT`, `ENTER`, `UP`.
     pub switches: u8,
-    /// Acceleration in g: x, y, z.
+    /// Acceleration in g, in the screen's frame: x right, y down, z out of
+    /// the screen. At rest it points downhill: the badge's tilt.
     pub accel: [f32; 3],
-    pub imu_ok: bool,
-    pub cap_ok: bool,
+    /// Rotation rate in degrees per second, in the same frame.
+    pub gyro: [f32; 3],
 }

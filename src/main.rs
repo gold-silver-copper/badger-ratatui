@@ -8,7 +8,6 @@ extern crate alloc;
 mod cores;
 mod fault;
 mod lcd;
-mod marble;
 mod sensors;
 mod usb;
 
@@ -29,7 +28,6 @@ use static_cell::ConstStaticCell;
 
 use crate::cores::TwoCores;
 use crate::lcd::{Lcd, Pins};
-use crate::marble::Marble;
 use crate::sensors::Sensors;
 use crate::showcase::Showcase;
 
@@ -157,12 +155,7 @@ async fn main(_spawner: Spawner) {
     let _ = terminal.flush();
     terminal.backend_mut().panel_mut().light();
 
-    let mut marble = Marble::new();
     let mut showcase = Showcase::new(0x2350, SHOWCASE_BUFFERS.take());
-    let mut show_demo = true;
-    let mut previous_switches = 0u8;
-    let mut nav_held = 0u8;
-    let mut nav_since = Instant::now();
     let mut ticker = Ticker::every(Duration::from_hz(60));
     let mut last = Instant::now();
     let mut bootsel_held = Instant::now();
@@ -179,9 +172,6 @@ async fn main(_spawner: Spawner) {
         let mut input = sensors.read();
         // Held for this one frame, which the showcase sees as a press.
         input.switches |= usb::take_presses();
-        if usb::take_switch() {
-            show_demo = !show_demo;
-        }
         // Hold physical up + down for two seconds to reboot into the USB bootloader.
         let up_down = sensors::UP | sensors::DOWN;
         if input.switches & up_down != up_down {
@@ -190,35 +180,13 @@ async fn main(_spawner: Spawner) {
             embassy_rp::rom_data::reset_to_usb_boot(0, 0);
         }
 
-        // Debounce navigation and switch once per press, not every frame held.
-        let navigation = input.switches & (sensors::LEFT | sensors::RIGHT);
-        if navigation != nav_held {
-            nav_held = navigation;
-            nav_since = now;
-        }
-        if now - nav_since >= Duration::from_millis(30) {
-            let pressed = navigation & !previous_switches;
-            previous_switches = navigation;
-            if pressed == sensors::LEFT || pressed == sensors::RIGHT {
-                show_demo = !show_demo;
-            }
-        }
-
-        if show_demo {
-            showcase.update(&input, dt);
-        } else {
-            marble.update(input, dt.min(0.1), now.as_millis());
-        }
+        showcase.update(&input, dt);
         let drawing = Instant::now();
         stats.update_us = (drawing - now).as_micros();
         let mut render_us = 0;
         let _ = terminal.draw(|f| {
             let start = Instant::now();
-            if show_demo {
-                showcase.render(f.area(), f.buffer_mut(), &mut cores);
-            } else {
-                marble.draw(f);
-            }
+            showcase.render(f.area(), f.buffer_mut(), &mut cores);
             render_us = start.elapsed().as_micros();
         });
         stats.render_us = render_us;
@@ -227,11 +195,8 @@ async fn main(_spawner: Spawner) {
             .elapsed()
             .as_micros()
             .saturating_sub(render_us + stats.flush_us);
-        (stats.screen, stats.detail) = if show_demo {
-            ("showcase", showcase.backdrop())
-        } else {
-            ("marble", "")
-        };
+        stats.backdrop = showcase.backdrop();
+        (stats.accel, stats.gyro) = (input.accel, input.gyro);
         usb::record(&stats);
         ticker.next().await;
     }
