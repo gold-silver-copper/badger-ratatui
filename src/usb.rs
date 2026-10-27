@@ -1,14 +1,14 @@
 //! A USB serial port, run from a high-priority interrupt executor so it stays
 //! responsive while the main loop renders. Once a second it reports the frame
 //! timings; it takes the commands `bootsel` (reboot into the USB bootloader to
-//! be flashed), `screen` (switch screens) and `press up|down|enter`.
+//! be flashed) and `press up|down|left|right|enter`.
 
 use core::cell::Cell;
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use alloc::string::String;
-use badger_ratatui::input::{DOWN, ENTER, UP};
+use badger_ratatui::input::{DOWN, ENTER, LEFT, RIGHT, UP};
 use embassy_executor::InterruptExecutor;
 use embassy_futures::join::join;
 use embassy_rp::interrupt;
@@ -48,9 +48,11 @@ pub struct Stats {
     pub flush_us: u64,
     /// Whole frames, start to start.
     pub frame_us: u64,
-    pub screen: &'static str,
-    /// What the screen shows: the showcase's backdrop.
-    pub detail: &'static str,
+    /// The showcase's backdrop.
+    pub backdrop: &'static str,
+    /// The latest IMU reading: acceleration in g and rotation in °/s.
+    pub accel: [f32; 3],
+    pub gyro: [f32; 3],
 }
 
 impl Stats {
@@ -61,8 +63,9 @@ impl Stats {
         self.draw_us += other.draw_us;
         self.flush_us += other.flush_us;
         self.frame_us += other.frame_us;
-        self.screen = other.screen;
-        self.detail = other.detail;
+        self.backdrop = other.backdrop;
+        self.accel = other.accel;
+        self.gyro = other.gyro;
     }
 }
 
@@ -73,10 +76,10 @@ static STATS: CriticalSectionMutex<Cell<Stats>> = CriticalSectionMutex::new(Cell
     draw_us: 0,
     flush_us: 0,
     frame_us: 0,
-    screen: "",
-    detail: "",
+    backdrop: "",
+    accel: [0.0; 3],
+    gyro: [0.0; 3],
 }));
-static SWITCH: AtomicBool = AtomicBool::new(false);
 static PRESSES: AtomicU8 = AtomicU8::new(0);
 
 /// Adds one frame's timings to the next report.
@@ -86,11 +89,6 @@ pub fn record(frame: &Stats) {
         total.add(frame);
         s.set(total);
     });
-}
-
-/// Whether the host asked to switch screens since the last call.
-pub fn take_switch() -> bool {
-    SWITCH.swap(false, Ordering::Relaxed)
 }
 
 /// Buttons the host pressed since the last call, as `input` switch bits.
@@ -150,15 +148,19 @@ async fn report(mut tx: Sender<'static, Driver<'static, USB>>) {
             let mut line = String::new();
             let _ = write!(
                 line,
-                "{} {} fps {:.1} | frame {:.1} update {:.1} render {:.1} draw {:.1} flush {:.1} ms",
-                s.screen,
-                s.detail,
+                "{} fps {:.1} | frame {:.1} update {:.1} render {:.1} draw {:.1} flush {:.1} ms",
+                s.backdrop,
                 s.frames as f32 * 1e6 / s.frame_us.max(1) as f32,
                 ms(s.frame_us),
                 ms(s.update_us),
                 ms(s.render_us),
                 ms(s.draw_us),
                 ms(s.flush_us),
+            );
+            let ([ax, ay, az], [gx, gy, gz]) = (s.accel, s.gyro);
+            let _ = write!(
+                line,
+                " | g {ax:.2} {ay:.2} {az:.2} dps {gx:.0} {gy:.0} {gz:.0}"
             );
             let heap = &crate::HEAP;
             let _ = write!(
@@ -205,9 +207,10 @@ async fn commands(mut rx: Receiver<'static, Driver<'static, USB>>) {
                 if b == b'\n' || b == b'\r' {
                     match line.trim() {
                         "bootsel" => embassy_rp::rom_data::reset_to_usb_boot(0, 0),
-                        "screen" => SWITCH.store(true, Ordering::Relaxed),
                         "press up" => press(UP),
                         "press down" => press(DOWN),
+                        "press left" => press(LEFT),
+                        "press right" => press(RIGHT),
                         "press enter" => press(ENTER),
                         _ => {}
                     }

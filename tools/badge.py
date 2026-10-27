@@ -2,7 +2,7 @@
 """Talk to the firmware's USB serial port.
 
     badge.py stats [SECONDS]   print the once-a-second frame timing reports
-    badge.py send COMMAND      send `bootsel` or `screen`
+    badge.py send COMMAND      send `bootsel` or `press up|down|left|right|enter`
 """
 import glob
 import sys

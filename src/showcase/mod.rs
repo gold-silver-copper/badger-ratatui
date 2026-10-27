@@ -11,7 +11,7 @@ mod paint;
 use core::f32::consts::TAU;
 use core::fmt::Write as _;
 
-use self::fast::{floorf, roundf, sinf, sqrtf};
+use self::fast::{cosf, floorf, roundf, sinf, sqrtf};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -92,6 +92,17 @@ const BEAT: f32 = 0.5;
 const HOLD: f32 = 16.0 * BEAT;
 const TRANSITION: f32 = 2.0 * BEAT;
 const CAPTION: f32 = 3.0;
+/// A jolt harder than this, in g, cuts to a new scene (the IMU reads up to 2).
+const SHAKE: f32 = 1.7;
+/// The art's spring: its stiffness and damping per second, and how far
+/// gravity pulls it, in screen heights per g at rest times the stiffness.
+const STIFFNESS: f32 = 40.0;
+const DAMPING: f32 = 3.0;
+const PULL: f32 = 10.0;
+/// How far the art may swing from the middle, in screen heights.
+const REACH: (f32, f32) = (0.35, 0.28);
+/// Turning the badge at this many degrees a second doubles the backdrop's pace.
+const SPIN: f32 = 90.0;
 
 /// wyrand: small, fast, good enough for picking scenes.
 pub struct Rng(u64);
@@ -264,6 +275,41 @@ impl Scene {
     }
 }
 
+/// The art hangs on a spring in the badge: tilt the badge and it slides
+/// downhill, jostle it and it wobbles, and it leans into its swing. Offsets
+/// are in screen heights from the middle.
+#[derive(Clone, Copy, Default)]
+struct Body {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+}
+
+impl Body {
+    /// One step under `accel`, the badge's acceleration in the screen's frame.
+    fn step(&mut self, [ax, ay, _]: [f32; 3], dt: f32) {
+        self.vx += (PULL * ax - STIFFNESS * self.x - DAMPING * self.vx) * dt;
+        self.vy += (PULL * ay - STIFFNESS * self.y - DAMPING * self.vy) * dt;
+        self.x += self.vx * dt;
+        self.y += self.vy * dt;
+        // The screen's edges: the art bounces off them, losing most of its speed.
+        if self.x.abs() > REACH.0 {
+            self.x = self.x.clamp(-REACH.0, REACH.0);
+            self.vx *= -0.4;
+        }
+        if self.y.abs() > REACH.1 {
+            self.y = self.y.clamp(-REACH.1, REACH.1);
+            self.vy *= -0.4;
+        }
+    }
+
+    /// The lean, in radians: the top trails the swing.
+    fn lean(&self) -> f32 {
+        (self.vx * 0.25).clamp(-0.35, 0.35)
+    }
+}
+
 /// A scene's art placed on the grid for this frame.
 struct Placed<'a> {
     art: &'a Bitmap,
@@ -271,13 +317,15 @@ struct Placed<'a> {
     cy: f32,
     sx: f32,
     sy: f32,
+    /// The lean's cosine and sine.
+    lean: (f32, f32),
     /// The wave motion's vertical offset for each sample column, from one
     /// left of the screen to one right of it; all 0 when the art doesn't wave.
     lift: [f32; MAX_W + 2],
 }
 
 impl Placed<'_> {
-    fn new<'a>(art: &'a Bitmap, motion: Motion, g: &Geometry, t: f32) -> Placed<'a> {
+    fn new<'a>(art: &'a Bitmap, motion: Motion, body: &Body, g: &Geometry, t: f32) -> Placed<'a> {
         let (w, h) = (art.width.max(1) as f32, art.height.max(1) as f32);
         let ratio = art.aspect / SAMPLE_ASPECT;
         let (box_w, box_h) = (g.w as f32 * 0.88, g.h as f32 * 0.86);
@@ -289,7 +337,10 @@ impl Placed<'_> {
         } else {
             (fit, fit * ratio)
         };
-        let (mut cx, mut cy) = (g.w as f32 * 0.5, g.h as f32 * 0.5);
+        let (mut cx, mut cy) = (
+            g.w as f32 * 0.5 + body.x * g.h as f32 * SAMPLE_ASPECT,
+            g.h as f32 * 0.5 + body.y * g.h as f32,
+        );
         let mut wave = 0.0;
         let bar = 4.0 * BEAT;
         match motion {
@@ -316,6 +367,7 @@ impl Placed<'_> {
             cy,
             sx,
             sy,
+            lean: (cosf(body.lean()), sinf(body.lean())),
             lift,
         }
     }
@@ -323,13 +375,19 @@ impl Placed<'_> {
     /// The art pixel under sample `(x, y)`, and where it lies in the art (0..1).
     fn at(&self, x: i32, y: i32) -> (Material, f32, f32) {
         let (w, h) = (self.art.width as f32, self.art.height as f32);
-        let ax = (x as f32 + 0.5 - self.cx) / self.sx + w * 0.5;
         let lift = usize::try_from(x + 1)
             .ok()
             .and_then(|i| self.lift.get(i))
             .copied()
             .unwrap_or(0.0);
-        let ay = (y as f32 + 0.5 - self.cy - lift) / self.sy + h * 0.5;
+        // Turned by the lean in square units: a sample is taller than wide.
+        let (dx, dy) = (
+            x as f32 + 0.5 - self.cx,
+            (y as f32 + 0.5 - self.cy - lift) * SAMPLE_ASPECT,
+        );
+        let (c, s) = self.lean;
+        let ax = (c * dx + s * dy) / self.sx + w * 0.5;
+        let ay = (c * dy - s * dx) / SAMPLE_ASPECT / self.sy + h * 0.5;
         if ax < 0.0 || ay < 0.0 {
             return (Material::Empty, 0.0, 0.0);
         }
@@ -359,6 +417,9 @@ pub struct Showcase {
     cut_at: f32,
     caption: Caption,
     buffers: &'static mut Buffers,
+    body: Body,
+    /// The backdrops' clock: it runs faster while the badge turns.
+    flow: f32,
     /// The grid size and aspect `buffers.polar` holds the geometry of.
     grid: Option<(u32, u32, f32)>,
     /// Whether `buffers.wipe_at` holds this transition's wipe.
@@ -370,6 +431,20 @@ pub struct Showcase {
 /// cores, where there are two.
 pub trait Cores {
     fn join(&mut self, a: &mut (dyn FnMut() + Send), b: &mut (dyn FnMut() + Send));
+}
+
+fn norm([x, y, z]: [f32; 3]) -> f32 {
+    sqrtf(x * x + y * y + z * z)
+}
+
+/// The item `by` places from `current` in `items`, wrapping around.
+fn step<T: Copy + PartialEq>(items: &[T], current: T, by: isize) -> T {
+    let len = items.len().max(1) as isize;
+    let at = items.iter().position(|&i| i == current).unwrap_or(0) as isize;
+    items
+        .get((at + by).rem_euclid(len) as usize)
+        .copied()
+        .unwrap_or(current)
 }
 
 /// One core: one piece of work after the other.
@@ -405,6 +480,8 @@ impl Showcase {
             wipe: Wipe::Radial,
             cut_at: 0.0,
             buffers,
+            body: Body::default(),
+            flow: 0.0,
             grid: None,
             wipe_ready: false,
             prev_switches: 0,
@@ -417,11 +494,15 @@ impl Showcase {
     }
 
     pub fn update(&mut self, input: &Reading, dt: f32) {
-        use crate::input::{DOWN, ENTER, UP};
+        use crate::input::{DOWN, ENTER, LEFT, RIGHT, UP};
         self.t += dt;
+        self.body.step(input.accel, dt.min(0.05));
+        let spin = norm(input.gyro);
+        self.flow += dt * (1.0 + spin / SPIN);
+        let shaken = norm(input.accel) > SHAKE && self.t - self.cut_at > TRANSITION;
         let pressed = input.switches & !self.prev_switches;
         self.prev_switches = input.switches;
-        if pressed & ENTER != 0 {
+        if pressed & ENTER != 0 || shaken {
             let next = self.scene.varied(&mut self.rng);
             self.cut(next);
         } else if pressed & UP != 0 {
@@ -430,14 +511,12 @@ impl Showcase {
             self.cut(next);
         } else if pressed & DOWN != 0 {
             let mut next = self.scene.clone();
-            let i = BACKDROPS
-                .iter()
-                .position(|&b| b == next.backdrop)
-                .map_or(0, |i| i + 1);
-            next.backdrop = BACKDROPS
-                .get(i % BACKDROPS.len())
-                .copied()
-                .unwrap_or(Backdrop::Vignette);
+            next.shader = step(SHADERS, next.shader, 1);
+            self.cut(next);
+        } else if pressed & (LEFT | RIGHT) != 0 {
+            let mut next = self.scene.clone();
+            let by = if pressed & LEFT != 0 { -1 } else { 1 };
+            next.backdrop = step(BACKDROPS, next.backdrop, by);
             self.cut(next);
         } else if self.t - self.cut_at >= HOLD {
             // Runs of a few related scenes, then a fresh start.
@@ -494,11 +573,12 @@ impl Showcase {
             }
             self.wipe_ready = true;
         }
-        let new = Layer::new(&self.scene, &self.art, g, t);
+        let (body, flow) = (&self.body, self.flow);
+        let new = Layer::new(&self.scene, &self.art, body, g, t, flow);
         let old = self
             .old
             .as_ref()
-            .map(|(scene, art)| Layer::new(scene, art, g, t));
+            .map(|(scene, art)| Layer::new(scene, art, body, g, t, flow));
         let frame = &FrameJob {
             g,
             new,
@@ -571,11 +651,21 @@ struct Layer<'a> {
 }
 
 impl<'a> Layer<'a> {
-    fn new(scene: &'a Scene, art: &'a Bitmap, g: &Geometry, t: f32) -> Self {
+    /// `flow` is the backdrop's clock, `t` the art's.
+    fn new(
+        scene: &'a Scene,
+        art: &'a Bitmap,
+        body: &Body,
+        g: &Geometry,
+        t: f32,
+        flow: f32,
+    ) -> Self {
         Self {
             scene,
-            art: Placed::new(art, scene.motion, g, t),
-            backdrop: scene.backdrop.prepare(&scene.palette, g, t, scene.variant),
+            art: Placed::new(art, scene.motion, body, g, t),
+            backdrop: scene
+                .backdrop
+                .prepare(&scene.palette, g, flow, scene.variant),
         }
     }
 
@@ -710,7 +800,7 @@ fn encode(samples: &[Rgb], w: usize, area: Rect, buf: &mut Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{DOWN, ENTER, UP};
+    use crate::input::{DOWN, ENTER, LEFT, RIGHT, UP};
     use alloc::boxed::Box;
 
     fn showcase(seed: u64) -> Showcase {
@@ -736,9 +826,17 @@ mod tests {
         assert_eq!(show.scene.palette.name, "Aurora");
         input.switches = 0;
         show.update(&input, 0.05);
-        input.switches = DOWN;
+        input.switches = RIGHT;
         show.update(&input, 0.05);
         assert!(show.scene.backdrop == Backdrop::Grid);
+        input.switches = LEFT;
+        show.update(&input, 0.05);
+        assert!(show.scene.backdrop == Backdrop::Stars);
+        input.switches = 0;
+        show.update(&input, 0.05);
+        input.switches = DOWN;
+        show.update(&input, 0.05);
+        assert!(show.scene.shader == Shader::Rainbow);
         input.switches = 0;
         show.update(&input, 0.05);
         input.switches = ENTER;
@@ -774,6 +872,17 @@ mod tests {
             }
         }
         assert!(buf.content.iter().any(|c| c.symbol() != " "));
+    }
+
+    #[test]
+    fn tilted_art_slides_downhill_and_settles() {
+        let mut body = Body::default();
+        for _ in 0..600 {
+            body.step([0.5, -0.2, 0.8], 1.0 / 60.0);
+        }
+        assert!((body.x - PULL * 0.5 / STIFFNESS).abs() < 1e-3);
+        assert!((body.y + PULL * 0.2 / STIFFNESS).abs() < 1e-3);
+        assert!(body.lean().abs() < 1e-3);
     }
 
     #[test]

@@ -3,22 +3,25 @@
 Rust firmware for the Universe 2026 badge: Embassy and Ratatui, through a
 backend written for the badge's panel (`src/term/`).
 
-## Screens and controls
+## Controls
 
-Starts on the showcase. Press **left or right** to switch between showcase and
-marble (once per press, wrapping around). Screens keep their state when hidden;
-the hidden screen is paused.
+| Button | Does |
+| --- | --- |
+| Left / Right | Previous / next background |
+| Up | Next colour theme |
+| Down | Next ink shader |
+| Enter | Next scene (one or two things change) |
+| Up + Down held 2 seconds | USB bootloader |
 
-| Button | Showcase | Marble |
-| --- | --- | --- |
-| Left / Right | Change screen | Change screen |
-| Up | Next colour theme | Push up |
-| Down | Next background | Push down |
-| Enter | Next scene | Kick |
-| Up + Down held 2 seconds | USB bootloader | USB bootloader |
+The IMU moves the show:
 
-Tilt rolls the marble. The capacitive pads are still unverified; this change
-does not attempt to fix them.
+- **Tilt**: the art hangs on a spring. It slides downhill, wobbles when the
+  badge is jostled, leans into its swing and bounces off the screen's edges.
+- **Turn**: the backgrounds run faster while the badge rotates, twice as fast
+  at 90° a second.
+- **Shake** hard: a new scene.
+
+Left alone, the show changes scene every eight seconds.
 
 ## Showcase subset
 
@@ -53,8 +56,8 @@ six metaballs instead of seven. The fractals are tuned for the coarse grid:
 shallower zooms, fewer folds and lines about a sample wide, and the 3D fields
 are drawn as 2D slices. GPU simulations, 3D ray marching, distance fields,
 system fonts and full-screen post-processing are not included.
-Sources are in `src/showcase/{art,paint,fractal,mod}.rs`. The marble is in
-`src/marble.rs`, and `src/main.rs` handles physical screen navigation.
+Sources are in `src/showcase/{art,paint,fractal,mod}.rs`; `src/sensors.rs`
+reads the buttons and the IMU.
 The source artwork and ported algorithms retain their MIT notices in
 `licenses/`.
 
@@ -85,8 +88,9 @@ seconds (or hold HOME/BOOT, tap RESET, release HOME/BOOT) while it waits.
 ## USB serial
 
 The firmware shows up as `/dev/serial/by-id/usb-rig_badger-ratatui_badger-if00`.
-Once a second it reports the mean frame timings and the showcase's backdrop;
-it takes the commands `bootsel`, `screen` and `press up|down|enter`:
+Once a second it reports the backdrop, the mean frame timings and the latest
+IMU reading; it takes the commands `bootsel` and
+`press up|down|left|right|enter`:
 
 ```sh
 cd ~/code/badger-ratatui && ~/.cache/rig-tmp/badge-venv/bin/python tools/badge.py stats 5
@@ -95,10 +99,11 @@ cd ~/code/badger-ratatui && ~/.cache/rig-tmp/badge-venv/bin/python tools/badge.p
 `tools/bench-backdrops.sh` steps through every backdrop with `press down` and
 prints each one's fps and render time.
 
-- **render**: the screen's own drawing into ratatui's buffer (the showcase's
-  shading, the marble's widgets).
+- **render**: the showcase's shading into ratatui's buffer.
 - **draw**: ratatui's diff and the backend drawing the changed cells.
 - **flush**: CPU time starting and waiting on panel transfers.
+- **g** / **dps**: acceleration in g and rotation in degrees a second, in the
+  screen's frame (x right, y down, z out of the screen).
 - **heap**: bytes in use / free, the high-water mark, and the largest single
   request since boot.
 - **FAULT** / **BEFORE RESET**: the first panic or hard fault of this run, or
@@ -121,17 +126,17 @@ is computed once per grid size, and the rows are split between both cores.
 The showcase's tables live in a static (`showcase::Buffers`), not the heap:
 only Ratatui allocates, so the first-fit heap stays at about 54 KiB.
 
-Mean frame times on the badge, in ms (8 seconds per screen; the showcase's
-first scene, stars behind the mascot):
+Mean frame times on the badge, in ms (8 seconds; the first scene, stars
+behind the mascot):
 
-| Build | Showcase fps | render | draw | flush | Marble fps | render | draw | flush |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| mousefood, 150 MHz | 2.3-3.0 | 255-376 | 66-76 | 14.9 | 10.4 | 78.6 | 2.0 | 14.9 |
-| new backend, CPU-driven bus | 3.0-3.8 | 244-314 | 6.5-7.1 | 11.3 | 11.0 | 84.5 | 2.0 | 3.4-11 |
-| new backend, PIO + DMA | 3.1-4.0 | 243-313 | 4.6-4.9 | 0.0 | 11.3 | 85.9 | 2.0 | 0.1 |
-| + 200 MHz | 4.0-5.4 | 183-238 | 3.3-3.7 | 0.0 | 15.2 | 63.9 | 1.5 | 0.0 |
-| + fast f32 maths, precomputed geometry | 33-41 | 21-25 | 3 | 0.0 | 15.2 | 63.9 | 1.5 | 0.0 |
-| + second core | 48-58 | 14-17 | 2.4-3.1 | 0.0 | 15-18 | 55-64 | 1.5-2.1 | 0.0 |
+| Build | fps | render | draw | flush |
+| --- | --- | --- | --- | --- |
+| mousefood, 150 MHz | 2.3-3.0 | 255-376 | 66-76 | 14.9 |
+| new backend, CPU-driven bus | 3.0-3.8 | 244-314 | 6.5-7.1 | 11.3 |
+| new backend, PIO + DMA | 3.1-4.0 | 243-313 | 4.6-4.9 | 0.0 |
+| + 200 MHz | 4.0-5.4 | 183-238 | 3.3-3.7 | 0.0 |
+| + fast f32 maths, precomputed geometry | 33-41 | 21-25 | 3 | 0.0 |
+| + second core | 48-58 | 14-17 | 2.4-3.1 | 0.0 |
 
 The showcase is capped at 60 fps by the main loop's ticker. By backdrop
 (`tools/bench-backdrops.sh`, with the first second of each step a transition):
@@ -141,8 +146,7 @@ the kaleidoscope and the mandala.
 Code runs from flash through a 16 KiB cache the two cores share. The fractals'
 per-sample code is one function, kept out of line (`Fractal::paint`): inlined
 into the other backdrops it made a 21 KiB function, and the Mandelbox, whose
-code then fell where it evicted the shading, took 74 ms a frame instead of 24. The marble is
-unchanged: ratatui's `Canvas` and widgets, in `f64`.
+code then fell where it evicted the shading, took 74 ms a frame instead of 24.
 
 ## Restore MonaOS
 
