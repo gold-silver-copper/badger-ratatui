@@ -7,6 +7,7 @@ use core::f32::consts::{PI, TAU};
 use super::fast::{atan2f, cosf, expf, floorf, log2f, powf, sinf, sqrtf};
 use ratatui::style::Color;
 
+use super::fractal::Fractal;
 use super::{MAX_W, Rng};
 
 // ---------------------------------------------------------------- maths
@@ -500,6 +501,18 @@ pub enum Backdrop {
     Tunnel,
     Warp,
     Metaballs,
+    Mandelbrot,
+    Ship,
+    Newton,
+    Apollonian,
+    Hyperbolic,
+    Domain,
+    Glass,
+    Mandala,
+    Mandelbox,
+    Kaliset,
+    Quaternion,
+    Quasicrystal,
 }
 
 pub const BACKDROPS: &[Backdrop] = &[
@@ -513,6 +526,18 @@ pub const BACKDROPS: &[Backdrop] = &[
     Backdrop::Tunnel,
     Backdrop::Warp,
     Backdrop::Metaballs,
+    Backdrop::Mandelbrot,
+    Backdrop::Ship,
+    Backdrop::Newton,
+    Backdrop::Apollonian,
+    Backdrop::Hyperbolic,
+    Backdrop::Domain,
+    Backdrop::Glass,
+    Backdrop::Mandala,
+    Backdrop::Mandelbox,
+    Backdrop::Kaliset,
+    Backdrop::Quaternion,
+    Backdrop::Quasicrystal,
 ];
 
 impl Backdrop {
@@ -528,13 +553,27 @@ impl Backdrop {
             Backdrop::Tunnel => "tunnel",
             Backdrop::Warp => "warp",
             Backdrop::Metaballs => "metaballs",
+            Backdrop::Mandelbrot => "mandelbrot",
+            Backdrop::Ship => "burning ship",
+            Backdrop::Newton => "newton",
+            Backdrop::Apollonian => "apollonian",
+            Backdrop::Hyperbolic => "hyperbolic",
+            Backdrop::Domain => "domain colouring",
+            Backdrop::Glass => "stained glass",
+            Backdrop::Mandala => "mandala",
+            Backdrop::Mandelbox => "mandelbox",
+            Backdrop::Kaliset => "kaliset",
+            Backdrop::Quaternion => "quaternion julia",
+            Backdrop::Quasicrystal => "quasicrystal",
         }
     }
 
     /// What this backdrop needs this frame that is the same for every sample.
-    pub fn prepare(self, p: &Palette, g: &Geometry, t: f32) -> Prepared {
+    /// `variant` picks among a fractal's forms: a tiling, a scale, a kit.
+    pub fn prepare(self, p: &Palette, g: &Geometry, t: f32, variant: u32) -> Prepared {
         let mut prepared = Prepared {
             t,
+            fractal: Fractal::new(self, g, t, variant),
             julia: (0.0, 0.0),
             balls: [Ball::default(); 6],
             aurora: [[(0.0, 0.0); 3]; MAX_W],
@@ -577,7 +616,19 @@ impl Backdrop {
             | Backdrop::Rays
             | Backdrop::Kaleidoscope
             | Backdrop::Tunnel
-            | Backdrop::Warp => {}
+            | Backdrop::Warp
+            | Backdrop::Mandelbrot
+            | Backdrop::Ship
+            | Backdrop::Newton
+            | Backdrop::Apollonian
+            | Backdrop::Hyperbolic
+            | Backdrop::Domain
+            | Backdrop::Glass
+            | Backdrop::Mandala
+            | Backdrop::Mandelbox
+            | Backdrop::Kaliset
+            | Backdrop::Quaternion
+            | Backdrop::Quasicrystal => {}
         }
         prepared
     }
@@ -627,6 +678,18 @@ impl Backdrop {
                 base.add(p.sample(0.3).scale(beam * beam * falloff * 0.12))
             }
             Backdrop::Julia => julia(p, pt, f.julia, t).scale(0.7),
+            Backdrop::Mandelbrot
+            | Backdrop::Ship
+            | Backdrop::Newton
+            | Backdrop::Apollonian
+            | Backdrop::Hyperbolic
+            | Backdrop::Domain
+            | Backdrop::Glass
+            | Backdrop::Mandala
+            | Backdrop::Mandelbox
+            | Backdrop::Kaliset
+            | Backdrop::Quaternion
+            | Backdrop::Quasicrystal => f.fractal.paint(p, pt, t),
             Backdrop::Kaleidoscope => kaleidoscope(p, pt, t).scale(0.65),
             Backdrop::Tunnel => {
                 let r = pt.r.max(1e-3);
@@ -803,6 +866,7 @@ pub struct Ball {
 /// A backdrop's per-frame constants.
 pub struct Prepared {
     pub t: f32,
+    fractal: Fractal,
     julia: (f32, f32),
     balls: [Ball; 6],
     /// Per column: each curtain's hem and ray brightness.

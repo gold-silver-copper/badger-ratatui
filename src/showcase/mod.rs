@@ -5,6 +5,7 @@
 
 mod art;
 mod fast;
+mod fractal;
 mod paint;
 
 use core::f32::consts::TAU;
@@ -207,6 +208,8 @@ struct Scene {
     subject: Subject,
     style: Style,
     motion: Motion,
+    /// Which form of the backdrop: a tiling, a scale, a kit.
+    variant: u32,
 }
 
 impl Scene {
@@ -218,6 +221,7 @@ impl Scene {
             subject: rng.pick(SUBJECTS, Subject::Mascot),
             style: rng.pick(STYLES, Style::Solid),
             motion: rng.pick(MOTIONS, Motion::Still),
+            variant: rng.next() as u32,
         }
     }
 
@@ -227,7 +231,10 @@ impl Scene {
         for _ in 0..1 + rng.below(2) {
             match rng.below(6) {
                 0 => next.palette = Palette::random(rng),
-                1 => next.backdrop = rng.pick(BACKDROPS, Backdrop::Vignette),
+                1 => {
+                    next.backdrop = rng.pick(BACKDROPS, Backdrop::Vignette);
+                    next.variant = rng.next() as u32;
+                }
                 2 => next.shader = rng.pick(SHADERS, Shader::Flow),
                 3 => next.subject = rng.pick(SUBJECTS, Subject::Mascot),
                 4 => next.style = rng.pick(STYLES, Style::Solid),
@@ -385,6 +392,7 @@ impl Showcase {
             subject: Subject::Mascot,
             style: Style::Solid,
             motion: Motion::Float,
+            variant: 0,
         };
         let _ = rng.next();
         Self {
@@ -401,6 +409,11 @@ impl Showcase {
             wipe_ready: false,
             prev_switches: 0,
         }
+    }
+
+    /// The backdrop's name.
+    pub fn backdrop(&self) -> &'static str {
+        self.scene.backdrop.name()
     }
 
     pub fn update(&mut self, input: &Reading, dt: f32) {
@@ -562,7 +575,7 @@ impl<'a> Layer<'a> {
         Self {
             scene,
             art: Placed::new(art, scene.motion, g, t),
-            backdrop: scene.backdrop.prepare(&scene.palette, g, t),
+            backdrop: scene.backdrop.prepare(&scene.palette, g, t, scene.variant),
         }
     }
 
@@ -741,9 +754,9 @@ mod tests {
         let mut show = showcase(42);
         let area = Rect::new(0, 0, 53, 18);
         let mut buf = Buffer::empty(area);
-        for (index, shader) in SHADERS.iter().copied().enumerate() {
+        for index in 0..SHADERS.len().max(BACKDROPS.len()) {
             let mut scene = Scene::random(&mut show.rng);
-            scene.shader = shader;
+            scene.shader = SHADERS.get(index % SHADERS.len()).copied().expect("shader");
             scene.backdrop = BACKDROPS
                 .get(index % BACKDROPS.len())
                 .copied()

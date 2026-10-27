@@ -30,8 +30,15 @@ at `f33d69f`:
 - All 11 named palettes, looping gradients and generated OKLCH harmonies.
 - 13 ink shaders: flow, plasma, pulse, sheen, rainbow, scanline, chrome, holo,
   fire, stripes, marble, gold and glitter.
-- 10 backgrounds: vignette, stars, synthwave grid, aurora, sun rays, Julia,
-  kaleidoscope, tunnel, warp and metaballs.
+- 22 backgrounds: vignette, stars, synthwave grid, aurora, sun rays, Julia,
+  kaleidoscope, tunnel, warp, metaballs, a Mandelbrot zoom into seahorse
+  valley, the Burning Ship, Newton's method, the Apollonian gasket, hyperbolic
+  {p, q} tilings, domain colouring and stained glass. From
+  [hyper-surf](https://github.com/gold-silver-copper/hyper-surf)'s sky and
+  worlds: the mandala, and slices through the Mandelbox (Halls and Citadel
+  scales), the Kaliset (dunes, strands, badlands), a quaternion Julia set
+  (Julia Reef's constants) and a quasicrystal. Each scene picks one form of
+  its fractal.
 - Solid, shadow, outline and neon treatments; still, float, wave, breathe and
   sway motions.
 - 120 bpm, four bars per scene, related scene variations, two-beat wipes.
@@ -42,9 +49,11 @@ at `f33d69f`:
 The desktop renderer requires a GPU. This is a CPU port of selected formulas,
 not its Bevy/wgpu renderer. It uses 2x2 samples per cell instead of 4x8, three
 noise octaves instead of four, 48 Julia iterations without orbit traps, and
-six metaballs instead of seven. GPU simulations, 3D ray marching, distance
-fields, system fonts and full-screen post-processing are not included.
-Sources are in `src/showcase/{art,paint,mod}.rs`. The marble is in
+six metaballs instead of seven. The fractals are tuned for the coarse grid:
+shallower zooms, fewer folds and lines about a sample wide, and the 3D fields
+are drawn as 2D slices. GPU simulations, 3D ray marching, distance fields,
+system fonts and full-screen post-processing are not included.
+Sources are in `src/showcase/{art,paint,fractal,mod}.rs`. The marble is in
 `src/marble.rs`, and `src/main.rs` handles physical screen navigation.
 The source artwork and ported algorithms retain their MIT notices in
 `licenses/`.
@@ -76,12 +85,15 @@ seconds (or hold HOME/BOOT, tap RESET, release HOME/BOOT) while it waits.
 ## USB serial
 
 The firmware shows up as `/dev/serial/by-id/usb-rig_badger-ratatui_badger-if00`.
-Once a second it reports the mean frame timings; it takes the commands
-`bootsel` and `screen`:
+Once a second it reports the mean frame timings and the showcase's backdrop;
+it takes the commands `bootsel`, `screen` and `press up|down|enter`:
 
 ```sh
 cd ~/code/badger-ratatui && ~/.cache/rig-tmp/badge-venv/bin/python tools/badge.py stats 5
 ```
+
+`tools/bench-backdrops.sh` steps through every backdrop with `press down` and
+prints each one's fps and render time.
 
 - **render**: the screen's own drawing into ratatui's buffer (the showcase's
   shading, the marble's widgets).
@@ -121,7 +133,15 @@ first scene, stars behind the mascot):
 | + fast f32 maths, precomputed geometry | 33-41 | 21-25 | 3 | 0.0 | 15.2 | 63.9 | 1.5 | 0.0 |
 | + second core | 48-58 | 14-17 | 2.4-3.1 | 0.0 | 15-18 | 55-64 | 1.5-2.1 | 0.0 |
 
-The showcase is capped at 60 fps by the main loop's ticker. The marble is
+The showcase is capped at 60 fps by the main loop's ticker. By backdrop
+(`tools/bench-backdrops.sh`, with the first second of each step a transition):
+31-59 fps, render 14-29 ms; the slowest are the Mandelbrot at its deepest zoom,
+the kaleidoscope and the mandala.
+
+Code runs from flash through a 16 KiB cache the two cores share. The fractals'
+per-sample code is one function, kept out of line (`Fractal::paint`): inlined
+into the other backdrops it made a 21 KiB function, and the Mandelbox, whose
+code then fell where it evicted the shading, took 74 ms a frame instead of 24. The marble is
 unchanged: ratatui's `Canvas` and widgets, in `f64`.
 
 ## Restore MonaOS

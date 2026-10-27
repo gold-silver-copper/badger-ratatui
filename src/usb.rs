@@ -1,13 +1,14 @@
 //! A USB serial port, run from a high-priority interrupt executor so it stays
 //! responsive while the main loop renders. Once a second it reports the frame
 //! timings; it takes the commands `bootsel` (reboot into the USB bootloader to
-//! be flashed) and `screen` (switch screens).
+//! be flashed), `screen` (switch screens) and `press up|down|enter`.
 
 use core::cell::Cell;
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use alloc::string::String;
+use badger_ratatui::input::{DOWN, ENTER, UP};
 use embassy_executor::InterruptExecutor;
 use embassy_futures::join::join;
 use embassy_rp::interrupt;
@@ -48,6 +49,8 @@ pub struct Stats {
     /// Whole frames, start to start.
     pub frame_us: u64,
     pub screen: &'static str,
+    /// What the screen shows: the showcase's backdrop.
+    pub detail: &'static str,
 }
 
 impl Stats {
@@ -59,6 +62,7 @@ impl Stats {
         self.flush_us += other.flush_us;
         self.frame_us += other.frame_us;
         self.screen = other.screen;
+        self.detail = other.detail;
     }
 }
 
@@ -70,8 +74,10 @@ static STATS: CriticalSectionMutex<Cell<Stats>> = CriticalSectionMutex::new(Cell
     flush_us: 0,
     frame_us: 0,
     screen: "",
+    detail: "",
 }));
 static SWITCH: AtomicBool = AtomicBool::new(false);
+static PRESSES: AtomicU8 = AtomicU8::new(0);
 
 /// Adds one frame's timings to the next report.
 pub fn record(frame: &Stats) {
@@ -85,6 +91,11 @@ pub fn record(frame: &Stats) {
 /// Whether the host asked to switch screens since the last call.
 pub fn take_switch() -> bool {
     SWITCH.swap(false, Ordering::Relaxed)
+}
+
+/// Buttons the host pressed since the last call, as `input` switch bits.
+pub fn take_presses() -> u8 {
+    PRESSES.swap(0, Ordering::Relaxed)
 }
 
 pub fn start(usb: Peri<'static, USB>) {
@@ -139,8 +150,9 @@ async fn report(mut tx: Sender<'static, Driver<'static, USB>>) {
             let mut line = String::new();
             let _ = write!(
                 line,
-                "{} fps {:.1} | frame {:.1} update {:.1} render {:.1} draw {:.1} flush {:.1} ms",
+                "{} {} fps {:.1} | frame {:.1} update {:.1} render {:.1} draw {:.1} flush {:.1} ms",
                 s.screen,
+                s.detail,
                 s.frames as f32 * 1e6 / s.frame_us.max(1) as f32,
                 ms(s.frame_us),
                 ms(s.update_us),
@@ -179,6 +191,10 @@ async fn report(mut tx: Sender<'static, Driver<'static, USB>>) {
     }
 }
 
+fn press(button: u8) {
+    PRESSES.fetch_or(button, Ordering::Relaxed);
+}
+
 async fn commands(mut rx: Receiver<'static, Driver<'static, USB>>) {
     let mut line = String::new();
     let mut buf = [0u8; 64];
@@ -190,6 +206,9 @@ async fn commands(mut rx: Receiver<'static, Driver<'static, USB>>) {
                     match line.trim() {
                         "bootsel" => embassy_rp::rom_data::reset_to_usb_boot(0, 0),
                         "screen" => SWITCH.store(true, Ordering::Relaxed),
+                        "press up" => press(UP),
+                        "press down" => press(DOWN),
+                        "press enter" => press(ENTER),
                         _ => {}
                     }
                     line.clear();
