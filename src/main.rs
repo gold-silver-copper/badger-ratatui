@@ -176,7 +176,9 @@ async fn main(_spawner: Spawner) {
         };
         last = now;
 
-        let input = sensors.read();
+        let mut input = sensors.read();
+        // Held for this one frame, which the showcase sees as a press.
+        input.switches |= usb::take_presses();
         if usb::take_switch() {
             show_demo = !show_demo;
         }
@@ -225,7 +227,11 @@ async fn main(_spawner: Spawner) {
             .elapsed()
             .as_micros()
             .saturating_sub(render_us + stats.flush_us);
-        stats.screen = if show_demo { "showcase" } else { "marble" };
+        (stats.screen, stats.detail) = if show_demo {
+            ("showcase", showcase.backdrop())
+        } else {
+            ("marble", "")
+        };
         usb::record(&stats);
         ticker.next().await;
     }
